@@ -8,6 +8,10 @@ on:
         description: 'The base branch to compare against (e.g., main)'
         required: true
         type: string
+      repo:
+        description: 'The repository name (e.g., h3-api-gateway)'
+        required: true
+        type: string
 
 jobs:
   check-up-to-date:
@@ -18,16 +22,18 @@ jobs:
       - name: Checkout the repository
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # Fetch all history for accurate comparisons
-
-      - name: Fetch the latest base branch
-        run: git fetch origin ${{ inputs.base_branch }}
+          fetch-depth: 0 # Fetch all history for accurate comparisons
+          repository: H3aven-Labs/${{ inputs.repo }}
+          token: ${{ secrets.H3_NPM_TOKEN }}
+          path: repo
 
       - name: Check if the branch is up-to-date with base
         id: check_branch
         run: |
+          cd repo
           BASE_BRANCH=${{ inputs.base_branch }}
           CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          git fetch origin ${{ inputs.base_branch }}
 
           # Check if CURRENT_BRANCH is behind BASE_BRANCH
           if git merge-base --is-ancestor origin/$BASE_BRANCH HEAD; then
