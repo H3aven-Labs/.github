@@ -32,6 +32,7 @@ jobs:
           # Check if CURRENT_BRANCH is behind BASE_BRANCH
           if git merge-base --is-ancestor origin/$BASE_BRANCH HEAD; then
             echo "::set-output name=is_up_to_date::true"
+            exit 1
           else
             echo "::set-output name=is_up_to_date::false"
           fi
