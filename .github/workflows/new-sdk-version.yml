@@ -19,6 +19,11 @@ on:
         required: false
         type: boolean
         default: false
+      auto_merge:
+        description: "Add --auto-merge to commit message"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build_and_release:
@@ -146,8 +151,14 @@ jobs:
           # Add changes
           git add package.json ${{ env.openapi_file }}
 
+          # Prepare commit message
+          commit_message="Release version ${{ env.new_version }}"
+          if [ "${{ inputs.auto_merge }}" == "true" ]; then
+            commit_message="$commit_message --auto-merge"
+          fi
+
           # Commit changes
-          git commit -m "Release version ${{ env.new_version }}"
+          git commit -m "$commit_message"
 
           # Push the new branch to the SDK repository
           git push origin "$branch_name"
