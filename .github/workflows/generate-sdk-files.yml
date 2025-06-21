@@ -1,0 +1,42 @@
+name: Generate SDK Files
+
+on:
+  workflow_call:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        timeout-minutes: 1
+        with:
+          node-version: 16.18.1
+          cache: 'yarn'
+
+      - uses: actions/setup-java@v3
+        timeout-minutes: 1
+        with:
+          distribution: 'zulu'
+          java-version: '8'
+
+      - name: Set variables
+        timeout-minutes: 1
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.H3_NPM_TOKEN }}" >> .npmrc
+          echo "@h3aven-labs:registry=https://npm.pkg.github.com/" >> .npmrc
+          echo "PACKAGE_VERSION=$(cat package.json | jq -r .version)" >> $GITHUB_ENV
+
+      - name: Generate SDK files
+        timeout-minutes: 2
+        run: |
+          yarn
+          yarn generate
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "<>"
+          git add .
+          git commit --allow-empty -m "v${{ env.PACKAGE_VERSION }}"
+          git push -f origin HEAD:release/${{ env.PACKAGE_VERSION }}
