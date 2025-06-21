@@ -9,6 +9,11 @@ on:
         required: false
         type: string
         default: "minor"
+      openapi_format:
+        description: "OpenAPI file format to copy (yml or json)"
+        required: false
+        type: string
+        default: "yml"
 
 jobs:
   build_and_release:
@@ -108,10 +113,17 @@ jobs:
           # Export the new version for later steps
           echo "new_version=$new_version" >> $GITHUB_ENV
 
-      # Step 7: Copy openapi-docs.yml to the SDK repository
+      # Step 7: Copy OpenAPI docs to the SDK repository
       - name: Copy OpenAPI Docs to SDK
         run: |
-          cp openapi-docs.yml sdk/openapi-docs.yml
+          openapi_format="${{ inputs.openapi_format }}"
+          if [ "$openapi_format" == "json" ]; then
+            cp openapi-docs.json sdk/openapi-docs.json
+            echo "openapi_file=openapi-docs.json" >> $GITHUB_ENV
+          else
+            cp openapi-docs.yml sdk/openapi-docs.yml
+            echo "openapi_file=openapi-docs.yml" >> $GITHUB_ENV
+          fi
 
       # Step 8: Commit and push changes to SDK repository
       - name: Commit and Push to SDK
@@ -125,7 +137,7 @@ jobs:
           git checkout -b "$branch_name"
 
           # Add changes
-          git add package.json openapi-docs.yml
+          git add package.json ${{ env.openapi_file }}
 
           # Commit changes
           git commit -m "Release version ${{ env.new_version }}"
@@ -139,7 +151,7 @@ jobs:
           SDK_REPO_OWNER: ${{ github.repository_owner }}
           SDK_REPO_NAME: ${{ github.event.repository.name }}-sdk
           PR_TITLE: "Release version ${{ env.new_version }}"
-          PR_BODY: "This PR bumps the SDK to version ${{ env.new_version }}.\n\n- Bumped version in package.json\n- Updated openapi-docs.json.\n- Automatically triggered by ${{ github.actor }} from repository ${{ github.repository }} on branch ${{ github.ref_name }}."
+          PR_BODY: "This PR bumps the SDK to version ${{ env.new_version }}.\n\n- Bumped version in package.json\n- Updated ${{ env.openapi_file }}.\n- Automatically triggered by ${{ github.actor }} from repository ${{ github.repository }} on branch ${{ github.ref_name }}."
           PR_HEAD: release/${{ env.new_version }}
           PR_BASE: main
           SDK_REPO_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
