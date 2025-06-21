@@ -1,0 +1,127 @@
+name: "Discord Deployment Notifications"
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        description: "Deployment status (started, success, failure, cancelled)"
+        required: true
+        type: string
+      stage:
+        description: "Deployment stage (dev, qa, hml, prod)"
+        required: true
+        type: string
+      message:
+        description: 'Custom message (defaults to "Deployment <status>")'
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: "Repository name"
+        required: false
+        type: string
+        default: ""
+      branch:
+        description: "Branch name"
+        required: false
+        type: string
+        default: ""
+      actor:
+        description: "Actor who triggered the deployment"
+        required: false
+        type: string
+        default: ""
+      run_url:
+        description: "GitHub Actions run URL"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      webhook_url:
+        description: "Discord webhook URL"
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set Default Values
+        id: defaults
+        run: |
+          # Set repository default
+          if [ -n "${{ inputs.repository }}" ]; then
+            echo "repository=${{ inputs.repository }}" >> $GITHUB_OUTPUT
+          else
+            echo "repository=${{ github.repository }}" >> $GITHUB_OUTPUT
+          fi
+          
+          # Set branch default
+          if [ -n "${{ inputs.branch }}" ]; then
+            echo "branch=${{ inputs.branch }}" >> $GITHUB_OUTPUT
+          else
+            echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+          
+          # Set actor default
+          if [ -n "${{ inputs.actor }}" ]; then
+            echo "actor=${{ inputs.actor }}" >> $GITHUB_OUTPUT
+          else
+            echo "actor=${{ github.actor }}" >> $GITHUB_OUTPUT
+          fi
+          
+          # Set run_url default
+          if [ -n "${{ inputs.run_url }}" ]; then
+            echo "run_url=${{ inputs.run_url }}" >> $GITHUB_OUTPUT
+          else
+            echo "run_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set Status Messages
+        id: messages
+        run: |
+          case "${{ inputs.status }}" in
+            "started")
+              emoji="🚀"
+              default_message="Deployment Started"
+              ;;
+            "success")
+              emoji="✅"
+              default_message="Deployment Successful"
+              ;;
+            "failure")
+              emoji="❌"
+              default_message="Deployment Failed"
+              ;;
+            "cancelled")
+              emoji="🛑"
+              default_message="Deployment Canceled"
+              ;;
+            *)
+              emoji="📋"
+              default_message="Deployment ${{ inputs.status }}"
+              ;;
+          esac
+
+          # Use custom message if provided, otherwise use default
+          if [ -n "${{ inputs.message }}" ]; then
+            final_message="${{ inputs.message }}"
+          else
+            final_message="$default_message"
+          fi
+
+          echo "emoji=$emoji" >> $GITHUB_OUTPUT
+          echo "final_message=$final_message" >> $GITHUB_OUTPUT
+
+      - name: Send Discord Notification
+        run: |
+          curl -H "Content-Type: application/json" \
+               -d "{
+               \"content\": \
+               \"${{ steps.messages.outputs.emoji }} **${{ steps.messages.outputs.final_message }}**\n\
+               **Stage:** ${{ inputs.stage }}\n\
+               **Repository:** ${{ steps.defaults.outputs.repository }}\n\
+               **Branch:** ${{ steps.defaults.outputs.branch }}\n\
+               **Triggered by:** ${{ steps.defaults.outputs.actor }}\n\
+               **Link to action:** ${{ steps.defaults.outputs.run_url }}\"
+               }"\
+               ${{ secrets.webhook_url }}
