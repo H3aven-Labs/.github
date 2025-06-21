@@ -1,0 +1,182 @@
+name: Release New SDK Version
+
+# This is a reusable workflow for organization-wide use
+on:
+  workflow_call:
+    inputs:
+      version_bump:
+        description: "Type of version bump"
+        required: false
+        type: string
+        default: "minor"
+
+jobs:
+  build_and_release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout ${{ github.event.repository.name }}
+        uses: actions/checkout@v3
+
+      - name: Enable Corepack and prepare correct Yarn version
+        run: |
+          corepack enable
+          corepack prepare yarn@4.9.1 --activate
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18.18.2"
+          cache: "yarn"
+
+      - name: Create NPMRC
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.H3_NPM_TOKEN }}" >> ~/.npmrc
+          echo "@h3aven-labs:registry=https://npm.pkg.github.com" >> ~/.npmrc
+          echo 'registry "https://registry.yarnpkg.com"' >> ~/.yarnrc
+
+      - name: Create .yarnrc.yml
+        run: |
+          cat <<EOF > .yarnrc.yml
+          nodeLinker: node-modules
+
+          npmRegistries:
+            "https://npm.pkg.github.com":
+              npmAuthToken: ${{ secrets.H3_NPM_TOKEN }}
+
+          npmScopes:
+            h3aven-labs:
+              npmAlwaysAuth: true
+              npmRegistryServer: "https://npm.pkg.github.com"
+          EOF
+
+      - name: Install dependencies
+        run: |
+          yarn install --frozen-lockfile
+          yarn prisma:setup:sqlite
+          cp .env.sample .env
+
+      # Step 4: Generate OpenAPI documentation
+      - name: Generate OpenAPI Docs
+        run: yarn generate:openapi:docs
+
+      # Step 5: Checkout the corresponding SDK repository
+      - name: Checkout ${{ github.event.repository.name }}-sdk
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository_owner }}/${{ github.event.repository.name }}-sdk
+          token: ${{ secrets.H3_NPM_TOKEN }}
+          path: sdk
+
+      # Step 6: Bump version in package.json based on input
+      - name: Bump version
+        id: bump_version
+        run: |
+          cd sdk
+          # Ensure jq is installed
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # Extract current version
+          current_version=$(jq -r .version package.json)
+          echo "Current version: $current_version"
+
+          # Determine version bump type from input parameter
+          version_bump_type="${{ inputs.version_bump }}"
+
+          if [ "$version_bump_type" == "major" ]; then
+            bump_type="major"
+            IFS='.' read -r major minor patch <<< "$current_version"
+            major=$((major + 1))
+            minor=0
+            patch=0
+          elif [ "$version_bump_type" == "minor" ]; then
+            bump_type="minor"
+            IFS='.' read -r major minor patch <<< "$current_version"
+            minor=$((minor + 1))
+            patch=0
+          else
+            bump_type="patch"
+            IFS='.' read -r major minor patch <<< "$current_version"
+            patch=$((patch + 1))
+          fi
+
+          new_version="$major.$minor.$patch"
+          echo "Bumping $bump_type version: $new_version"
+
+          # Update package.json with the new version
+          jq --arg ver "$new_version" '.version = $ver' package.json > package.json.tmp && mv package.json.tmp package.json
+
+          # Export the new version for later steps
+          echo "new_version=$new_version" >> $GITHUB_ENV
+
+      # Step 7: Copy openapi-docs.yml to the SDK repository
+      - name: Copy OpenAPI Docs to SDK
+        run: |
+          cp openapi-docs.yml sdk/openapi-docs.yml
+
+      # Step 8: Commit and push changes to SDK repository
+      - name: Commit and Push to SDK
+        run: |
+          cd sdk
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "<>"
+
+          # Create a new branch
+          branch_name="release/${{ env.new_version }}"
+          git checkout -b "$branch_name"
+
+          # Add changes
+          git add package.json openapi-docs.yml
+
+          # Commit changes
+          git commit -m "Release version ${{ env.new_version }}"
+
+          # Push the new branch to the SDK repository
+          git push origin "$branch_name"
+
+      - name: Create Pull Request in SDK
+        env:
+          GITHUB_API_URL: https://api.github.com
+          SDK_REPO_OWNER: ${{ github.repository_owner }}
+          SDK_REPO_NAME: ${{ github.event.repository.name }}-sdk
+          PR_TITLE: "Release version ${{ env.new_version }}"
+          PR_BODY: "This PR bumps the SDK to version ${{ env.new_version }}.\n\n- Bumped version in package.json\n- Updated openapi-docs.json.\n- Automatically triggered by ${{ github.actor }} from repository ${{ github.repository }} on branch ${{ github.ref_name }}."
+          PR_HEAD: release/${{ env.new_version }}
+          PR_BASE: main
+          SDK_REPO_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+        run: |
+          # Construct the JSON payload for the PR
+          PR_DATA=$(jq -n \
+            --arg title "$PR_TITLE" \
+            --arg head "$PR_HEAD" \
+            --arg base "$PR_BASE" \
+            --arg body "$PR_BODY" \
+            '{title: $title, head: $head, base: $base, body: $body}')
+
+          # Make the API request to create the PR
+          response=$(curl -s -o response.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: token ${{ secrets.H3_NPM_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$GITHUB_API_URL/repos/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls" \
+            -d "$PR_DATA")
+
+          # Check the response code
+          if [ "$response" -eq 201 ]; then
+          curl -H "Content-Type: application/json" \
+               -d "{
+               \"content\": \
+               \"✅ **New SDK Version**\n\
+               **Repository:** ${{ github.repository }}\n\
+               **Version:** ${{ env.new_version }}\n\
+               **Triggered by:** ${{ github.actor }}\n\
+               **Link to PR:** https://github.com/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls\"
+               }"\
+               ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+            echo "Pull request created successfully."
+          elif [ "$response" -eq 422 ]; then
+            echo "A pull request for branch '$PR_HEAD' already exists or no changes to commit."
+          else
+            echo "Failed to create pull request. HTTP status code: $response"
+            cat response.json
+            exit 1
+          fi
