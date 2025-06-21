@@ -52,8 +52,8 @@ jobs:
       - name: Install dependencies
         run: |
           yarn install --frozen-lockfile
-          yarn prisma:setup:sqlite
           cp .env.sample .env
+          yarn prisma:setup:sqlite
 
       # Step 4: Generate OpenAPI documentation
       - name: Generate OpenAPI Docs
