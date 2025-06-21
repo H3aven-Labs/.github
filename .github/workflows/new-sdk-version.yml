@@ -14,6 +14,11 @@ on:
         required: false
         type: string
         default: "yml"
+      skip_prisma_setup:
+        description: "Skip running yarn prisma:setup:sqlite"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build_and_release:
@@ -58,7 +63,9 @@ jobs:
         run: |
           yarn install --frozen-lockfile
           cp .env.sample .env
-          yarn prisma:setup:sqlite
+          if [ "${{ inputs.skip_prisma_setup }}" != "true" ]; then
+            yarn prisma:setup:sqlite
+          fi
 
       # Step 4: Generate OpenAPI documentation
       - name: Generate OpenAPI Docs
