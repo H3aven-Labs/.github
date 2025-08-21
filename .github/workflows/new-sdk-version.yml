@@ -195,8 +195,7 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d "{
                \"text\": \
-               \"new PR opened in $SDK_REPO_NAME for version ${{ env.new_version }}. \n\
-               Link to PR: https://github.com/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls\"
+               \"new PR opened in $SDK_REPO_NAME for version ${{ env.new_version }}. \n\Link to PR: https://github.com/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls\"
                }"\
                ${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}
             echo "Pull request created successfully."
