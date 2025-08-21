@@ -194,14 +194,11 @@ jobs:
           if [ "$response" -eq 201 ]; then
           curl -H "Content-Type: application/json" \
                -d "{
-               \"content\": \
-               \"✅ **New SDK Version**\n\
-               **Repository:** ${{ github.repository }}\n\
-               **Version:** ${{ env.new_version }}\n\
-               **Triggered by:** ${{ github.actor }}\n\
-               **Link to PR:** https://github.com/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls\"
+               \"text\": \
+               \"new PR opened in $SDK_REPO_NAME for version ${{ env.new_version }}. \n\
+               Link to PR: https://github.com/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls\"
                }"\
-               ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+               ${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}
             echo "Pull request created successfully."
           elif [ "$response" -eq 422 ]; then
             echo "A pull request for branch '$PR_HEAD' already exists or no changes to commit."
