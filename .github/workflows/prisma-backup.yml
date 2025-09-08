@@ -22,7 +22,7 @@ jobs:
       matrix:
         # For scheduled runs, backup dev, qa, and hml sequentially
         # For manual runs, use the selected stage
-        stage: ${{ github.event_name == 'schedule' && fromJSON('["dev", "qa", "hml"]') || fromJSON(format('["{0}"]', github.event.inputs.stage || 'dev')) }}
+        stage: ${{ github.event.inputs.stage == 'all' && fromJSON('["dev", "qa", "hml"]') || fromJSON(format('["{0}"]', github.event.inputs.stage || 'dev')) }}
       fail-fast: false
     environment: ${{ matrix.stage }}
 
