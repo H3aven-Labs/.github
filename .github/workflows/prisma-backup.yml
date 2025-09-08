@@ -1,0 +1,163 @@
+name: Prisma Backup
+
+# This is a reusable workflow for organization-wide use
+on:
+  workflow_call:
+    inputs:
+      stage:
+        description: "Stage to backup"
+        required: false
+        type: string
+        default: "dev"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        # For scheduled runs, backup dev, qa, and hml sequentially
+        # For manual runs, use the selected stage
+        stage: ${{ github.event_name == 'schedule' && fromJSON('["dev", "qa", "hml"]') || fromJSON(format('["{0}"]', github.event.inputs.stage || 'dev')) }}
+      fail-fast: false
+    environment: ${{ matrix.stage }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set STAGE Environment Variable
+        run: |
+          echo "STAGE=${{ matrix.stage }}" >> "$GITHUB_ENV"
+
+      - name: Set RUN_URL Environment Variable
+        run: |
+          echo "RUN_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> $GITHUB_ENV
+          echo "CURRENT_DATETIME=$(date +'%d%m%H%M')" >> $GITHUB_ENV
+
+      - name: Set TUNNEL_PORT and AWS_REGION Environment Variable
+        run: |
+          if [ "${{ env.STAGE }}" = "qa" ]; then
+              echo "AWS_REGION=sa-east-1" >> "$GITHUB_ENV"
+              echo "TUNNEL_PORT=5433" >> "$GITHUB_ENV"
+          elif [ "${{ env.STAGE }}" = "hml" ]; then
+              echo "AWS_REGION=us-east-2" >> "$GITHUB_ENV"
+              echo "TUNNEL_PORT=5434" >> "$GITHUB_ENV"
+          elif [ "${{ env.STAGE }}" = "dev" ]; then
+              echo "AWS_REGION=us-east-1" >> "$GITHUB_ENV"
+              echo "TUNNEL_PORT=5434" >> "$GITHUB_ENV"
+          else
+              echo "Error: Invalid stage"
+              exit 1
+          fi
+
+      - name: Set DB_NAME Environment Variable
+        run: |
+          echo "DB_NAME=${{ github.event.repository.name }}-${{ env.AWS_REGION }}" >> "$GITHUB_ENV"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v1
+
+      - name: Export secrets to GITHUB_ENV
+        run: doppler secrets download --no-file --format=docker >> $GITHUB_ENV
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_CICD }}
+
+      - name: Clean Doppler envs
+        run: |
+          echo "Clean vars for CICD project..."
+          echo "DOPPLER_TOKEN=" >> $GITHUB_ENV
+          echo "DOPPLER_CONFIG=" >> $GITHUB_ENV
+          echo "DOPPLER_ENVIRONMENT=" >> $GITHUB_ENV
+
+      - name: Export secrets to .env
+        run: |
+          printf 'DATABASE_URL=%s\n' "$(doppler secrets get DATABASE_URL --plain)" >> $GITHUB_ENV
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_APP }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18.18.2"
+
+      - name: Install PostgreSQL 17
+        uses: tj-actions/install-postgresql@v3
+        with:
+          postgresql-version: 17
+
+      - name: debug
+        run: |
+          echo "${{ matrix.stage }}"
+          echo "${{ github.event.repository.name }}"
+          pg_dump --version
+
+      - name: Start Prisma Tunnel
+        run: |
+          # Start the tunnel using the DATABASE_URL set from SSM secrets
+          : > tunnel.log
+          nohup npx cross-env DATABASE_URL="${{ env.DATABASE_URL }}" npx @prisma/ppg-tunnel@0.2.0 --host 127.0.0.1 --port ${{ env.TUNNEL_PORT }} > tunnel.log 2>&1 &
+          # Allow time for the tunnel to establish
+          sleep 3
+          # Exit if the tunnel reported an invalid URL
+          if grep -q "ERR_INVALID_URL" tunnel.log; then
+            echo "Error: ERR_INVALID_URL detected while starting Prisma tunnel."
+            cat tunnel.log
+            exit 1
+          fi
+
+      - name: Dump PostgreSQL Database via Docker
+        timeout-minutes: 10
+        run: |
+          DATE=$(date +'%Y-%m-%d-%H-%M')
+          # Set DB_NAME dynamically based on AWS_REGION
+          BACKUP_FILE="${{ env.DB_NAME }}-${DATE}.sql"
+          BACKUP_FILE_DATA_ONLY="${{ env.DB_NAME }}-${DATE}-data-only.sql"
+          echo "BACKUP_FILE=${BACKUP_FILE}" >> $GITHUB_ENV
+          echo "BACKUP_FILE_DATA_ONLY=${BACKUP_FILE_DATA_ONLY}" >> $GITHUB_ENV
+
+          # Data-only backup
+          export BACKUP_FILE=${BACKUP_FILE_DATA_ONLY}
+          export PORT=${{ env.TUNNEL_PORT }}
+          bash ./bin/backup.bash > backup.log 2>&1
+          sleep 10
+          # Exit if the backup reported an connection refused
+          if grep -q "Connection refused" backup.log; then
+            echo "Error: Connection refused detected during backup."
+            cat backup.log
+            exit 1
+          fi
+          cat backup.log
+
+      - name: Upload Backup to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          S3_BUCKET: prisma-backups-${{ github.event.repository.name }}-${{ env.STAGE }}
+        run: |
+          # Upload data-only backup
+          if [ -f "${{ env.BACKUP_FILE_DATA_ONLY }}" ]; then
+            echo "Uploading ${{ env.BACKUP_FILE_DATA_ONLY }} to s3://$S3_BUCKET/${{ env.BACKUP_FILE_DATA_ONLY }}"
+            aws s3 cp "${{ env.BACKUP_FILE_DATA_ONLY }}" "s3://$S3_BUCKET/${{ env.BACKUP_FILE_DATA_ONLY }}"
+          else
+            echo "Error: Data-only backup file ${{ env.BACKUP_FILE_DATA_ONLY }} does not exist."
+            exit 1
+          fi
+
+      - name: Notify Slack - Backup Failed
+        if: ${{ failure() }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_URGENT_LOGS_WEBHOOK_URL }}
+          webhook-type: webhook-trigger
+          payload: |
+            status: "failed"
+            text: "‼️ Backup Failed\n Stage: ${{ env.STAGE }}\n Repository: ${{ github.repository }}\n Link to action: ${{ env.RUN_URL }}"
