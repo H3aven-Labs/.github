@@ -231,8 +231,8 @@ jobs:
             cp openapi-docs.json docs/api-reference/openapi-docs.json
             echo "docs_openapi_file=api-reference/openapi-docs.json" >> $GITHUB_ENV
           else
-            cp openapi-docs.yml docs/api-reference/openapi-docs.yml
-            echo "docs_openapi_file=api-reference/openapi-docs.yml" >> $GITHUB_ENV
+            cp openapi-docs.yml docs/api-reference/openapi.yml
+            echo "docs_openapi_file=api-reference/openapi.yml" >> $GITHUB_ENV
           fi
 
       # Step 11: Commit and push changes to docs repository
