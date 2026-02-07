@@ -24,6 +24,11 @@ on:
         required: false
         type: string
         default: "false"
+      update_docs:
+        description: "Update API reference documentation in docs repository"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build_and_release:
@@ -204,5 +209,100 @@ jobs:
           else
             echo "Failed to create pull request. HTTP status code: $response"
             cat response.json
+            exit 1
+          fi
+
+      # Step 9: Checkout the docs repository
+      - name: Checkout docs repository
+        if: inputs.update_docs
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository_owner }}/docs
+          token: ${{ secrets.H3_NPM_TOKEN }}
+          path: docs
+
+      # Step 10: Copy OpenAPI docs to docs repository api-reference folder
+      - name: Copy OpenAPI Docs to Docs
+        if: inputs.update_docs
+        run: |
+          openapi_format="${{ inputs.openapi_format }}"
+          mkdir -p docs/api-reference
+          if [ "$openapi_format" == "json" ]; then
+            cp openapi-docs.json docs/api-reference/openapi-docs.json
+            echo "docs_openapi_file=api-reference/openapi-docs.json" >> $GITHUB_ENV
+          else
+            cp openapi-docs.yml docs/api-reference/openapi-docs.yml
+            echo "docs_openapi_file=api-reference/openapi-docs.yml" >> $GITHUB_ENV
+          fi
+
+      # Step 11: Commit and push changes to docs repository
+      - name: Commit and Push to Docs
+        if: inputs.update_docs
+        run: |
+          cd docs
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "<>"
+
+          # Create a new branch
+          branch_name="update-openapi-file/${{ env.new_version }}"
+          git checkout -b "$branch_name"
+
+          # Add changes
+          git add ${{ env.docs_openapi_file }}
+
+          # Prepare commit message
+          commit_message="Update API reference for version ${{ env.new_version }}"
+          if [ "${{ inputs.auto_merge }}" == "true" ]; then
+            commit_message="$commit_message --auto-merge"
+          fi
+
+          # Commit changes
+          git commit -m "$commit_message"
+
+          # Push the new branch to the docs repository
+          git push origin "$branch_name"
+
+      - name: Create Pull Request in Docs
+        if: inputs.update_docs
+        env:
+          GITHUB_API_URL: https://api.github.com
+          DOCS_REPO_OWNER: ${{ github.repository_owner }}
+          DOCS_REPO_NAME: docs
+          PR_TITLE: "Update API reference for version ${{ env.new_version }}"
+          PR_BODY: "This PR updates the API reference documentation for version ${{ env.new_version }}.\n\n- Updated ${{ env.docs_openapi_file }}.\n- Automatically triggered by ${{ github.actor }} from repository ${{ github.repository }} on branch ${{ github.ref_name }}."
+          PR_HEAD: update-openapi-file/${{ env.new_version }}
+          PR_BASE: main
+          DOCS_REPO_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+        run: |
+          # Construct the JSON payload for the PR
+          PR_DATA=$(jq -n \
+            --arg title "$PR_TITLE" \
+            --arg head "$PR_HEAD" \
+            --arg base "$PR_BASE" \
+            --arg body "$PR_BODY" \
+            '{title: $title, head: $head, base: $base, body: $body}')
+
+          # Make the API request to create the PR
+          response=$(curl -s -o docs_response.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: token ${{ secrets.H3_NPM_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$GITHUB_API_URL/repos/$DOCS_REPO_OWNER/$DOCS_REPO_NAME/pulls" \
+            -d "$PR_DATA")
+
+          # Check the response code
+          if [ "$response" -eq 201 ]; then
+            curl -H "Content-Type: application/json" \
+                 -d "{
+                 \"text\": \
+                 \"new PR opened in docs for API reference update to version ${{ env.new_version }}. \n\Link to PR: https://github.com/$DOCS_REPO_OWNER/$DOCS_REPO_NAME/pulls\"
+                 }"\
+                 ${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}
+            echo "Pull request created successfully in docs repository."
+          elif [ "$response" -eq 422 ]; then
+            echo "A pull request for branch '$PR_HEAD' already exists or no changes to commit."
+          else
+            echo "Failed to create pull request in docs repository. HTTP status code: $response"
+            cat docs_response.json
             exit 1
           fi
