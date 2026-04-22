@@ -69,9 +69,20 @@ jobs:
               npmRegistryServer: "https://npm.pkg.github.com"
           EOF
 
+      - name: Cache yarn install
+        id: yarn_install_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            .yarn/install-state.gz
+          key: ${{ runner.os }}-yarn-install-${{ github.repository }}-${{ hashFiles('yarn.lock') }}
+
       - name: Install dependencies
         run: |
-          yarn install --frozen-lockfile
+          if [ "${{ steps.yarn_install_cache.outputs.cache-hit }}" != "true" ]; then
+            yarn install --frozen-lockfile
+          fi
           cp .env.sample .env
           if [ "${{ inputs.skip_prisma_setup }}" != "true" ]; then
             yarn prisma:setup:sqlite
