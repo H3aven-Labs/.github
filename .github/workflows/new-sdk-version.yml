@@ -32,7 +32,11 @@ on:
 
 jobs:
   build_and_release:
-    runs-on: ubuntu-latest
+    # Default: GitHub-hosted. When included Actions minutes are exhausted,
+    # flip without a workflow PR:
+    #   gh variable set CI_RUNNER --body blacksmith-2vcpu-ubuntu-2404
+    # Revert: gh variable delete CI_RUNNER
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
 
     steps:
       - name: Checkout ${{ github.event.repository.name }}

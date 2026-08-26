@@ -15,7 +15,11 @@ on:
 
 jobs:
   check-up-to-date:
-    runs-on: ubuntu-latest
+    # Default: GitHub-hosted. When included Actions minutes are exhausted,
+    # flip without a workflow PR:
+    #   gh variable set CI_RUNNER --body blacksmith-2vcpu-ubuntu-2404
+    # Revert: gh variable delete CI_RUNNER
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     outputs:
       is_up_to_date: ${{ steps.check_branch.outputs.is_up_to_date }}
     steps:
