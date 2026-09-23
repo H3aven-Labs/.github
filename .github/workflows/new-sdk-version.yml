@@ -37,6 +37,10 @@ jobs:
     #   gh variable set CI_RUNNER --body blacksmith-2vcpu-ubuntu-2404
     # Revert: gh variable delete CI_RUNNER
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Runs racing on the same SDK would compute the same version number
+    concurrency:
+      group: sdk-release-${{ github.repository }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout ${{ github.event.repository.name }}
@@ -50,7 +54,6 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: "22.19.0"
-          cache: "yarn"
 
       - name: Create NPMRC
         run: |
@@ -109,41 +112,20 @@ jobs:
         id: bump_version
         run: |
           cd sdk
-          # Ensure jq is installed
-          sudo apt-get update && sudo apt-get install -y jq
-
-          # Extract current version
           current_version=$(jq -r .version package.json)
           echo "Current version: $current_version"
 
-          # Determine version bump type from input parameter
-          version_bump_type="${{ inputs.version_bump }}"
-
-          if [ "$version_bump_type" == "major" ]; then
-            bump_type="major"
-            IFS='.' read -r major minor patch <<< "$current_version"
-            major=$((major + 1))
-            minor=0
-            patch=0
-          elif [ "$version_bump_type" == "minor" ]; then
-            bump_type="minor"
-            IFS='.' read -r major minor patch <<< "$current_version"
-            minor=$((minor + 1))
-            patch=0
-          else
-            bump_type="patch"
-            IFS='.' read -r major minor patch <<< "$current_version"
-            patch=$((patch + 1))
-          fi
+          IFS='.' read -r major minor patch <<< "$current_version"
+          case "${{ inputs.version_bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            *) patch=$((patch + 1)) ;;
+          esac
 
           new_version="$major.$minor.$patch"
-          echo "Bumping $bump_type version: $new_version"
-
-          # Update package.json with the new version
+          echo "Bumping ${{ inputs.version_bump }} version: $new_version"
           jq --arg ver "$new_version" '.version = $ver' package.json > package.json.tmp && mv package.json.tmp package.json
-
-          # Export the new version for later steps
-          echo "new_version=$new_version" >> $GITHUB_ENV
+          echo "new_version=$new_version" >> "$GITHUB_ENV"
 
       # Step 7: Copy OpenAPI docs to the SDK repository
       - name: Copy OpenAPI Docs to SDK
@@ -151,83 +133,88 @@ jobs:
           openapi_format="${{ inputs.openapi_format }}"
           if [ "$openapi_format" == "json" ]; then
             cp openapi-docs.json sdk/openapi-docs.json
-            echo "openapi_file=openapi-docs.json" >> $GITHUB_ENV
+            echo "openapi_file=openapi-docs.json" >> "$GITHUB_ENV"
           else
             cp openapi-docs.yml sdk/openapi-docs.yml
-            echo "openapi_file=openapi-docs.yml" >> $GITHUB_ENV
+            echo "openapi_file=openapi-docs.yml" >> "$GITHUB_ENV"
           fi
 
-      # Step 8: Commit and push changes to SDK repository
-      - name: Commit and Push to SDK
+      - name: Cache SDK yarn install
+        uses: actions/cache@v4
+        with:
+          path: |
+            sdk/node_modules
+            sdk/.yarn/install-state.gz
+          key: ${{ runner.os }}-sdk-yarn-${{ github.repository }}-${{ hashFiles('sdk/yarn.lock') }}
+
+      # Step 8: Generate the SDK client files (replaces the SDK repo's generate.yml)
+      - name: Generate SDK files
+        working-directory: sdk
+        env:
+          GITHUB_NPM_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+          YARN_ENABLE_IMMUTABLE_INSTALLS: "false"
         run: |
-          cd sdk
+          if [ ! -f .yarnrc.yml ]; then
+            printf 'nodeLinker: node-modules\n' > .yarnrc.yml
+          fi
+          yarn install
+          yarn build-sdk
+
+      # Step 9: Commit, open the release PR and merge it
+      - name: Commit and Push to SDK
+        working-directory: sdk
+        run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "<>"
 
-          # Create a new branch
           branch_name="release/${{ env.new_version }}"
           git checkout -b "$branch_name"
-
-          # Add changes
-          git add package.json ${{ env.openapi_file }}
-
-          # Prepare commit message
-          commit_message="Release version ${{ env.new_version }}"
-          if [ "${{ inputs.auto_merge }}" == "true" ]; then
-            commit_message="$commit_message --auto-merge"
-          fi
-
-          # Commit changes
-          git commit -m "$commit_message"
-
-          # Push the new branch to the SDK repository
-          git push origin "$branch_name"
+          git add -A -- . ':!.yarnrc.yml'
+          git commit -m "Release version ${{ env.new_version }}"
+          # A branch left behind by a failed run must not block this release
+          git push -f origin "$branch_name"
+          echo "sdk_branch=$branch_name" >> "$GITHUB_ENV"
 
       - name: Create Pull Request in SDK
+        working-directory: sdk
         env:
-          GITHUB_API_URL: https://api.github.com
-          SDK_REPO_OWNER: ${{ github.repository_owner }}
-          SDK_REPO_NAME: ${{ github.event.repository.name }}-sdk
-          PR_TITLE: "Release version ${{ env.new_version }}"
-          PR_BODY: "This PR bumps the SDK to version ${{ env.new_version }}.\n\n- Bumped version in package.json\n- Updated ${{ env.openapi_file }}.\n- Automatically triggered by ${{ github.actor }} from repository ${{ github.repository }} on branch ${{ github.ref_name }}."
-          PR_HEAD: release/${{ env.new_version }}
-          PR_BASE: main
-          SDK_REPO_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+          GH_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+          SDK_REPO: ${{ github.repository_owner }}/${{ github.event.repository.name }}-sdk
         run: |
-          # Construct the JSON payload for the PR
-          PR_DATA=$(jq -n \
-            --arg title "$PR_TITLE" \
-            --arg head "$PR_HEAD" \
-            --arg base "$PR_BASE" \
-            --arg body "$PR_BODY" \
-            '{title: $title, head: $head, base: $base, body: $body}')
-
-          # Make the API request to create the PR
-          response=$(curl -s -o response.json -w "%{http_code}" \
-            -X POST \
-            -H "Authorization: token ${{ secrets.H3_NPM_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "$GITHUB_API_URL/repos/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls" \
-            -d "$PR_DATA")
-
-          # Check the response code
-          if [ "$response" -eq 201 ]; then
-          curl -H "Content-Type: application/json" \
-               -d "{
-               \"text\": \
-               \"new PR opened in $SDK_REPO_NAME for version ${{ env.new_version }}. \n\Link to PR: https://github.com/$SDK_REPO_OWNER/$SDK_REPO_NAME/pulls\"
-               }"\
-               ${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}
-            echo "Pull request created successfully."
-          elif [ "$response" -eq 422 ]; then
-            echo "A pull request for branch '$PR_HEAD' already exists or no changes to commit."
-          else
-            echo "Failed to create pull request. HTTP status code: $response"
-            cat response.json
-            exit 1
+          pr_url=$(gh pr list -R "$SDK_REPO" --head "$sdk_branch" --state open --json url -q '.[0].url')
+          if [ -z "$pr_url" ]; then
+            pr_url=$(gh pr create -R "$SDK_REPO" \
+              --base main \
+              --head "$sdk_branch" \
+              --title "Release version ${{ env.new_version }}" \
+              --body "$(printf 'This PR bumps the SDK to version %s.\n\n- Bumped version in package.json\n- Updated %s and the generated client.\n- Automatically triggered by %s from repository %s on branch %s.' \
+                "${{ env.new_version }}" "${{ env.openapi_file }}" "${{ github.actor }}" "${{ github.repository }}" "${{ github.ref_name }}")")
           fi
+          echo "sdk_pr_url=$pr_url" >> "$GITHUB_ENV"
+          echo "Release PR: $pr_url"
 
-      # Step 9: Checkout the docs repository
+          curl -s -H "Content-Type: application/json" \
+            -d "$(jq -n --arg text "new PR opened in ${SDK_REPO#*/} for version ${{ env.new_version }}.
+          Link to PR: $pr_url" '{text: $text}')" \
+            "${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}" || true
+
+      # The merge push to main triggers the SDK repo's publish.yml
+      - name: Merge Pull Request in SDK
+        if: inputs.auto_merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+        run: |
+          # GitHub computes mergeability asynchronously right after the PR is created
+          for _ in 1 2 3 4 5 6; do
+            if gh pr merge "$sdk_pr_url" --squash --admin --delete-branch; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Failed to merge $sdk_pr_url"
+          exit 1
+
+      # Step 10: Checkout the docs repository
       - name: Checkout docs repository
         if: inputs.update_docs
         uses: actions/checkout@v3
@@ -236,7 +223,7 @@ jobs:
           token: ${{ secrets.H3_NPM_TOKEN }}
           path: docs
 
-      # Step 10: Copy OpenAPI docs to docs repository api-reference folder
+      # Step 11: Copy OpenAPI docs to docs repository api-reference folder
       - name: Copy OpenAPI Docs to Docs
         if: inputs.update_docs
         run: |
@@ -244,13 +231,13 @@ jobs:
           mkdir -p docs/api-reference
           if [ "$openapi_format" == "json" ]; then
             cp openapi-docs.json docs/api-reference/openapi-docs.json
-            echo "docs_openapi_file=api-reference/openapi-docs.json" >> $GITHUB_ENV
+            echo "docs_openapi_file=api-reference/openapi-docs.json" >> "$GITHUB_ENV"
           else
             cp openapi-docs.yml docs/api-reference/openapi.yml
-            echo "docs_openapi_file=api-reference/openapi.yml" >> $GITHUB_ENV
+            echo "docs_openapi_file=api-reference/openapi.yml" >> "$GITHUB_ENV"
           fi
 
-      # Step 11: Commit and push changes to docs repository
+      # Step 12: Commit and push changes to docs repository
       - name: Commit and Push to Docs
         if: inputs.update_docs
         run: |
