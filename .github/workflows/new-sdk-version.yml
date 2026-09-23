@@ -112,8 +112,14 @@ jobs:
         id: bump_version
         run: |
           cd sdk
-          current_version=$(jq -r .version package.json)
-          echo "Current version: $current_version"
+          main_version=$(jq -r .version package.json)
+          # Versions can reach the registry without landing on main (e.g. a local
+          # `npm publish`), so bump from whichever is higher to avoid E409 on publish
+          published_version=$(npm view "$(jq -r .name package.json)" versions --json 2>/dev/null \
+            | jq -r 'if type == "array" then .[] else . end' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          current_version=$(printf '%s\n' "$main_version" "$published_version" | grep . | sort -V | tail -1)
+          echo "Version on main: $main_version, highest published: ${published_version:-none}, bumping from: $current_version"
 
           IFS='.' read -r major minor patch <<< "$current_version"
           case "${{ inputs.version_bump }}" in
