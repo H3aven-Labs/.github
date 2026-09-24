@@ -204,7 +204,8 @@ jobs:
           Link to PR: $pr_url" '{text: $text}')" \
             "${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}" || true
 
-      # The merge push to main triggers the SDK repo's publish.yml
+      # [skip ci] keeps the SDK repo's publish.yml from republishing this version;
+      # it still publishes PRs that are merged by hand (auto_merge false)
       - name: Merge Pull Request in SDK
         if: inputs.auto_merge == 'true'
         env:
@@ -212,13 +213,44 @@ jobs:
         run: |
           # GitHub computes mergeability asynchronously right after the PR is created
           for _ in 1 2 3 4 5 6; do
-            if gh pr merge "$sdk_pr_url" --squash --admin --delete-branch; then
+            if gh pr merge "$sdk_pr_url" --squash --admin --delete-branch \
+              --subject "Release version ${{ env.new_version }} [skip ci]"; then
               exit 0
             fi
             sleep 3
           done
           echo "Failed to merge $sdk_pr_url"
           exit 1
+
+      - name: Publish SDK
+        if: inputs.auto_merge == 'true'
+        working-directory: sdk
+        env:
+          GITHUB_NPM_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+          YARN_ENABLE_IMMUTABLE_INSTALLS: "false"
+        run: npm publish
+
+      - name: Tag, notify and trigger SDK follow-ups
+        if: inputs.auto_merge == 'true'
+        working-directory: sdk
+        env:
+          GH_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
+          SDK_REPO: ${{ github.repository_owner }}/${{ github.event.repository.name }}-sdk
+        run: |
+          git fetch -q origin main
+          git tag -f "v${{ env.new_version }}" FETCH_HEAD
+          git push -f origin "v${{ env.new_version }}"
+
+          curl -s -H "Content-Type: application/json" \
+            -d "$(jq -n --arg text "${SDK_REPO#*/} v${{ env.new_version }} published!
+          Action Link: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              '{status: "success", text: $text}')" \
+            "${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}" || true
+
+          # Normally chained off the SDK repo's publish.yml, which [skip ci] suppresses
+          if gh api "repos/$SDK_REPO/contents/.github/workflows/update-h3-api-gateway.yml" --silent 2>/dev/null; then
+            gh workflow run update-h3-api-gateway.yml -R "$SDK_REPO"
+          fi
 
       # Step 10: Checkout the docs repository
       - name: Checkout docs repository
