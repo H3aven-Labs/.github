@@ -199,11 +199,6 @@ jobs:
           echo "sdk_pr_url=$pr_url" >> "$GITHUB_ENV"
           echo "Release PR: $pr_url"
 
-          curl -s -H "Content-Type: application/json" \
-            -d "$(jq -n --arg text "new PR opened in ${SDK_REPO#*/} for version ${{ env.new_version }}.
-          Link to PR: $pr_url" '{text: $text}')" \
-            "${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}" || true
-
       # [skip ci] keeps the SDK repo's publish.yml from republishing this version;
       # it still publishes PRs that are merged by hand (auto_merge false)
       - name: Merge Pull Request in SDK
