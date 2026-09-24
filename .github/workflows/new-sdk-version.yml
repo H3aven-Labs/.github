@@ -230,11 +230,10 @@ jobs:
           YARN_ENABLE_IMMUTABLE_INSTALLS: "false"
         run: npm publish
 
-      - name: Tag, notify and trigger SDK follow-ups
+      - name: Tag and notify
         if: inputs.auto_merge == 'true'
         working-directory: sdk
         env:
-          GH_TOKEN: ${{ secrets.H3_NPM_TOKEN }}
           SDK_REPO: ${{ github.repository_owner }}/${{ github.event.repository.name }}-sdk
         run: |
           git fetch -q origin main
@@ -246,11 +245,6 @@ jobs:
           Action Link: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
               '{status: "success", text: $text}')" \
             "${{ secrets.SLACK_VERSION_UPDATES_WEBHOOK_URL }}" || true
-
-          # Normally chained off the SDK repo's publish.yml, which [skip ci] suppresses
-          if gh api "repos/$SDK_REPO/contents/.github/workflows/update-h3-api-gateway.yml" --silent 2>/dev/null; then
-            gh workflow run update-h3-api-gateway.yml -R "$SDK_REPO"
-          fi
 
       # Step 10: Checkout the docs repository
       - name: Checkout docs repository
